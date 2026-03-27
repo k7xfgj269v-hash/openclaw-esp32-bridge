@@ -1,100 +1,152 @@
-# esp32-voice-server
+# ESP32 Voice Bridge — KI-Sprachschnittstelle für Mikrocontroller
 
-HTTP server that bridges ESP32-S3 hardware with OpenClaw AI agents, providing voice interaction capabilities including speech synthesis (TTS) and optional speech recognition (STT).
+HTTP-Bridge zwischen ESP32-S3-Hardware und KI-Agenten mit vollständiger Sprachverarbeitungs-Pipeline (STT + TTS).
 
-## Prerequisites
+```
+ESP32-S3 Gerät
+      │  HTTP POST (JSON)
+      ▼
+Voice Bridge Server (Python)
+      │  Subprocess
+      ▼
+KI-Agent (OpenClaw / beliebiger Agent)
+      │  Antworttext
+      ▼
+TTS-Synthese → HTTP-Antwort → ESP32
+```
 
-- Python 3.8 or later
-- [OpenClaw](https://github.com/openclaw) CLI installed and accessible on the server
-- An OpenClaw agent named `esp32-voice` (or whichever ID you configure via `OPENCLAW_AGENT_ID`)
+---
 
-## Environment Setup
+## Einsatzbereiche
 
-Copy the example file and fill in your values:
+- Sprachgesteuerte Embedded-Systeme
+- IoT-Geräte mit KI-Assistenz
+- Industrielle Mensch-Maschine-Schnittstellen
+- Prototypen für sprachbasierte Steuerung
+
+---
+
+## Voraussetzungen
+
+- Python 3.8 oder höher
+- OpenClaw CLI (oder kompatibler KI-Agent)
+- ESP32-S3 Mikrocontroller
+
+---
+
+## Installation
+
+```bash
+# Repository klonen
+git clone https://github.com/k7xfgj269v-hash/openclaw-esp32-bridge.git
+cd openclaw-esp32-bridge
+
+# Abhängigkeiten installieren
+pip install -r requirements.txt
+
+# Für vollständige Sprachpipeline (STT + TTS)
+pip install faster-whisper edge-tts
+```
+
+---
+
+## Konfiguration
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` with the paths and settings appropriate for your environment. See the [Environment Variables](#environment-variables) section below for a description of each variable.
+| Variable | Standard | Beschreibung |
+|----------|----------|--------------|
+| `SERVER_PORT` | `8080` | Server-Port |
+| `OPENCLAW_BIN` | `/usr/bin/openclaw` | Pfad zum KI-Agent-Binary |
+| `OPENCLAW_AGENT_ID` | `esp32-voice` | Agent-ID für Sprachsitzungen |
 
-## Installation
+---
 
-```bash
-pip install -r requirements.txt
-```
+## Verfügbare Server-Varianten
 
-For the subagent server (`openclaw_subagent_server.py`), additional packages are required:
+| Skript | Beschreibung |
+|--------|--------------|
+| `voice_server.py` | Basis-Server · pyttsx3 TTS |
+| `voice_server_enhanced.py` | Erweiterter Server · Dual-Agent-Routing |
+| `openclaw_agent_server.py` | Minimale HTTP-Wrapper (kein TTS) |
+| `openclaw_subagent_server.py` | Vollständige Pipeline · Whisper STT + Edge TTS |
 
-```bash
-pip install faster-whisper edge-tts
-```
-
-## Usage
-
-Choose the script that matches your use case:
-
-| Script | Use Case |
-|---|---|
-| `voice_server.py` | Basic voice server — receives ESP32 messages, routes them through a persistent OpenClaw agent (`esp32-voice`), and uses `pyttsx3` for local TTS playback. |
-| `voice_server_enhanced.py` | Enhanced version — same as above but also supports routing `@ki` prefixed messages to the primary (non-sub) OpenClaw agent. Recommended for most deployments. |
-| `openclaw_agent_server.py` | Minimal agent server — thin HTTP wrapper around OpenClaw, no TTS. Useful for debugging or headless deployments. |
-| `openclaw_subagent_server.py` | Full voice pipeline — adds Whisper-based STT (speech-to-text) and edge-tts for high-quality TTS. Requires `faster-whisper` and `edge-tts`. |
-
-Start the server (replace the script name as needed):
+### Empfohlen für die meisten Anwendungsfälle:
 
 ```bash
 python voice_server_enhanced.py
 ```
 
-The server listens on `0.0.0.0:SERVER_PORT` (default `8080`).
+---
 
-### ESP32 Request Format
+## ESP32-Anforderungsformat
 
-Send an HTTP POST to `http://<server-ip>:<port>/` with JSON body:
+HTTP POST an `http://<server-ip>:8080/`:
 
 ```json
 {
   "device_id": "esp32-01",
-  "message": "your voice command text here"
+  "message": "Temperatur anzeigen"
 }
 ```
 
-In `voice_server_enhanced.py`, prefix the message with `@ki ` to route it to the primary OpenClaw agent instead of the sub-agent.
+**Sitzungsverwaltung:** Jedes Gerät (`device_id`) erhält eine eigene Konversationssitzung — Kontext bleibt zwischen Anfragen erhalten.
 
-## Environment Variables
+---
 
-All configuration is read from environment variables. Copy `.env.example` to `.env` and set values there; the scripts load them via `os.environ.get()`.
+## Technische Details
 
-See `.env.example` for the full list with inline descriptions. Summary:
+- **Nebenläufigkeit:** Threading-Lock serialisiert KI-Aufrufe, verhindert Race Conditions
+- **Sitzungs-IDs:** Abgeleitet aus `device_id`, persistente Gesprächshistorie pro Gerät
+- **Dual-Routing:** Präfix `@ki` leitet Nachrichten an primären Agenten statt Sub-Agenten
+- **TTS-Optionen:** pyttsx3 (lokal, offline) oder Edge TTS (Microsoft Azure, höhere Qualität)
 
-| Variable | Default | Description |
-|---|---|---|
-| `SERVER_PORT` | `8080` | Port the HTTP server listens on |
-| `OPENCLAW_BIN` | `/home/ubuntu/.npm-global/bin/openclaw` | Absolute path to the `openclaw` executable |
-| `OPENCLAW_PATH_ENV` | `/home/ubuntu/.npm-global/bin:/usr/bin:/bin` | `PATH` value injected into subprocess environment |
-| `OPENCLAW_AGENT_ID` | `esp32-voice` | OpenClaw agent/sub-agent ID used for voice sessions |
+---
 
-## Architecture Overview
+## Sprachverarbeitungs-Pipeline (Subagent-Server)
 
 ```
-ESP32-S3 device
-      |  HTTP POST /  (JSON: device_id, message)
-      v
-voice_server*.py  (Python HTTP server, port 8080)
-      |
-      |  subprocess call
-      v
-openclaw CLI  --->  OpenClaw AI agent (esp32-voice)
-      |                      |
-      |    AI response text  |
-      |<---------------------|
-      |
-      |  (optional) TTS: pyttsx3 / edge-tts
-      v
-HTTP response  --->  ESP32-S3 device
+ESP32 sendet Audio-Transkription
+    │
+    ▼
+faster-whisper (lokale STT)
+    │  Transkribierter Text
+    ▼
+KI-Agent (Verarbeitung)
+    │  Antworttext
+    ▼
+edge-tts (Sprachsynthese)
+    │  Audio-Stream
+    ▼
+ESP32 empfängt Sprachantwort
 ```
 
-- The server is single-process with a threading lock around OpenClaw calls to serialise concurrent ESP32 requests.
-- Session IDs are derived from `device_id` so each device maintains conversation context across turns.
-- The `@ki` prefix in `voice_server_enhanced.py` bypasses the sub-agent and addresses the primary agent directly.
+---
+
+<details>
+<summary>English</summary>
+
+# ESP32 Voice Bridge — AI Voice Interface for Microcontrollers
+
+HTTP bridge connecting ESP32-S3 hardware to AI agents with full voice pipeline (STT + TTS).
+
+**Use cases:** Voice-controlled embedded systems · IoT devices with AI assistance · Industrial HMI prototypes
+
+**Quick start:**
+```bash
+pip install -r requirements.txt
+python voice_server_enhanced.py
+```
+
+**ESP32 request format:**
+```json
+{ "device_id": "esp32-01", "message": "your command here" }
+```
+
+Each `device_id` gets its own persistent conversation session.
+
+**Server variants:** Basic · Enhanced (dual-agent routing) · Minimal (no TTS) · Full pipeline (Whisper STT + Edge TTS)
+
+</details>
