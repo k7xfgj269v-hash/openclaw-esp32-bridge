@@ -13,28 +13,47 @@ import os
 import json
 import subprocess
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 
+from envcfg import load_dotenv
+
+load_dotenv()
+
 # 配置
-SERVER_HOST = '0.0.0.0'
+SERVER_HOST = os.environ.get('SERVER_HOST', '0.0.0.0')
 SERVER_PORT = int(os.environ.get('SERVER_PORT', '8080'))
 OPENCLAW_PATH = os.environ.get('OPENCLAW_BIN', '/home/ubuntu/.npm-global/bin/openclaw')
 SUB_AGENT_ID = os.environ.get('OPENCLAW_AGENT_ID', 'esp32-voice')  # 子智能体
+OPENCLAW_TIMEOUT = int(os.environ.get('OPENCLAW_TIMEOUT', '60'))
+MAX_BODY_BYTES = 1024 * 1024
+
+
+def openclaw_env():
+    """继承当前环境，仅覆盖 PATH，保留 HOME 等 openclaw 依赖的变量"""
+    env = dict(os.environ)
+    path_env = os.environ.get('OPENCLAW_PATH_ENV')
+    if path_env:
+        env['PATH'] = path_env
+    return env
+
 
 class OpenClawManager:
     def __init__(self):
         self.lock = threading.Lock()
-        self.sessions = {}  # {device_id: session_id}
+        self.sessions = {}  # {(device_id, agent): session_id} —— 主/子智能体会话各自独立
 
     def send_to_agent(self, message, agent_id=None, device_id='default'):
         """发送消息到OpenClaw智能体"""
         with self.lock:
             try:
                 # 检查是否是@ki命令（转发给主智能体）
-                if message.startswith('@ki '):
+                stripped = message.strip()
+                if stripped == '@ki' or stripped.startswith('@ki '):
                     target_agent = None  # 主智能体
-                    actual_message = message[4:]  # 去掉@ki前缀
+                    actual_message = stripped[3:].strip()  # 去掉@ki前缀
+                    if not actual_message:
+                        return {'success': False, 'error': '@ki 后缺少消息内容'}
                     print(f"[OpenClaw] 转发给主智能体: {actual_message[:50]}...")
                 else:
                     target_agent = agent_id or SUB_AGENT_ID
@@ -43,12 +62,13 @@ class OpenClawManager:
 
                 # 构建命令
                 cmd = [OPENCLAW_PATH, 'agent', '--message', actual_message, '--json']
-                
+
                 if target_agent:
                     cmd.extend(['--agent', target_agent])
 
-                # 获取会话ID
-                session_id = self.sessions.get(device_id)
+                # 获取会话ID（按设备+目标智能体区分，避免 @ki 把子智能体会话带进主智能体）
+                session_key = (device_id, target_agent or 'main')
+                session_id = self.sessions.get(session_key)
                 if session_id:
                     cmd.extend(['--session-id', session_id])
 
@@ -57,13 +77,13 @@ class OpenClawManager:
                     cmd,
                     capture_output=True,
                     text=True,
-                    timeout=30,
-                    env={'PATH': os.environ.get('OPENCLAW_PATH_ENV', '/home/ubuntu/.npm-global/bin:/usr/bin:/bin')}
+                    timeout=OPENCLAW_TIMEOUT,
+                    env=openclaw_env()
                 )
 
                 if result.returncode == 0:
                     response = json.loads(result.stdout)
-                    
+
                     # 提取回复文本
                     reply_text = ""
                     if 'result' in response and 'payloads' in response['result']:
@@ -76,10 +96,10 @@ class OpenClawManager:
                         agent_meta = response['result']['meta'].get('agentMeta', {})
                         new_session_id = agent_meta.get('sessionId')
                         if new_session_id:
-                            self.sessions[device_id] = new_session_id
+                            self.sessions[session_key] = new_session_id
 
                     print(f"[OpenClaw] ✓ 收到回复: {reply_text[:100]}...")
-                    
+
                     return {
                         'success': True,
                         'reply': reply_text,
@@ -106,26 +126,32 @@ class ESP32RequestHandler(BaseHTTPRequestHandler):
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         print(f"[{timestamp}] {self.address_string()} - {format % args}")
 
+    def send_json(self, obj, status=200):
+        body = json.dumps(obj, ensure_ascii=False).encode('utf-8')
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         """处理GET请求"""
         if self.path == '/status':
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            
-            status = {
+            self.send_json({
                 'status': 'online',
                 'timestamp': datetime.now().isoformat(),
                 'sub_agent': SUB_AGENT_ID,
                 'version': '3.0'
-            }
-            self.wfile.write(json.dumps(status, ensure_ascii=False).encode('utf-8'))
+            })
         else:
             self.send_error(404)
 
     def do_POST(self):
         """处理POST请求"""
         content_length = int(self.headers.get('Content-Length', 0))
+        if content_length > MAX_BODY_BYTES:
+            self.send_error(413, "Payload Too Large")
+            return
         post_data = self.rfile.read(content_length)
 
         try:
@@ -155,16 +181,13 @@ class ESP32RequestHandler(BaseHTTPRequestHandler):
                     print(f"[ESP32] 回复 to {device_id}: {result.get('reply', '')[:50]}...")
 
             # 发送响应
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps(response, ensure_ascii=False).encode('utf-8'))
+            self.send_json(response)
 
         except Exception as e:
             print(f"[错误] {e}")
             import traceback
             traceback.print_exc()
-            self.send_error(500, str(e))
+            self.send_error(500, "Internal Server Error")
 
 def main():
     print("=" * 70)
@@ -175,7 +198,7 @@ def main():
     print(f"主智能体: 使用 @ki 前缀访问")
     print("=" * 70)
 
-    server = HTTPServer((SERVER_HOST, SERVER_PORT), ESP32RequestHandler)
+    server = ThreadingHTTPServer((SERVER_HOST, SERVER_PORT), ESP32RequestHandler)
     
     print("[服务器] 启动成功，等待ESP32连接...")
     print("[服务器] 按Ctrl+C停止")
