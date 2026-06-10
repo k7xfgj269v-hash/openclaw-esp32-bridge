@@ -1,6 +1,9 @@
-# Core
+# voice_server.py — pyttsx3 TTS（可选，缺失时服务器仍可运行，仅停用本地播报）
 pyttsx3>=2.90
 
-# openclaw_subagent_server.py dependencies
+# openclaw_subagent_server.py — 语音管线（另需系统安装 ffmpeg）
 faster-whisper>=1.0.0
 edge-tts>=6.1.0
+
+# 测试
+pytest>=8.0

@@ -13,30 +13,47 @@ import os
 import json
 import subprocess
 import threading
-import time
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
-import pyttsx3
+
+from envcfg import load_dotenv
+
+load_dotenv()
+
+try:
+    import pyttsx3
+except ImportError:
+    pyttsx3 = None
 
 # 配置
-SERVER_HOST = '0.0.0.0'
+SERVER_HOST = os.environ.get('SERVER_HOST', '0.0.0.0')
 SERVER_PORT = int(os.environ.get('SERVER_PORT', '8080'))
 OPENCLAW_PATH = os.environ.get('OPENCLAW_BIN', '/home/ubuntu/.npm-global/bin/openclaw')
 OPENCLAW_AGENT_ID = os.environ.get('OPENCLAW_AGENT_ID', 'esp32-voice')  # 永久智能体ID
+OPENCLAW_TIMEOUT = int(os.environ.get('OPENCLAW_TIMEOUT', '60'))
+MAX_BODY_BYTES = 1024 * 1024  # 文本请求体上限
+
+
+def openclaw_env():
+    """继承当前环境，仅覆盖 PATH，保留 HOME 等 openclaw 依赖的变量"""
+    env = dict(os.environ)
+    path_env = os.environ.get('OPENCLAW_PATH_ENV')
+    if path_env:
+        env['PATH'] = path_env
+    return env
 
 # OpenClaw管理器
 class OpenClawManager:
     def __init__(self, agent_id):
         self.agent_id = agent_id
         self.lock = threading.Lock()
-        self.session_counter = 0
 
     def verify_agent(self):
         """验证智能体是否存在"""
         try:
             cmd = [OPENCLAW_PATH, 'agents', 'list', '--json']
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=10,
-                                  env={'PATH': os.environ.get('OPENCLAW_PATH_ENV', '/home/ubuntu/.npm-global/bin:/usr/bin:/bin')})
+                                  env=openclaw_env())
 
             if result.returncode == 0:
                 agents = json.loads(result.stdout)
@@ -76,8 +93,8 @@ class OpenClawManager:
                     cmd,
                     capture_output=True,
                     text=True,
-                    timeout=60,
-                    env={'PATH': os.environ.get('OPENCLAW_PATH_ENV', '/home/ubuntu/.npm-global/bin:/usr/bin:/bin')}
+                    timeout=OPENCLAW_TIMEOUT,
+                    env=openclaw_env()
                 )
 
                 if result.returncode == 0:
@@ -126,6 +143,10 @@ class OpenClawManager:
 # 语音合成管理
 class VoiceManager:
     def __init__(self):
+        if pyttsx3 is None:
+            print("[语音] ✗ 未安装 pyttsx3，语音播报停用")
+            self.available = False
+            return
         try:
             self.engine = pyttsx3.init()
             self.engine.setProperty('rate', 150)
@@ -180,26 +201,32 @@ class ESP32RequestHandler(BaseHTTPRequestHandler):
         """自定义日志格式"""
         print(f"[HTTP] {self.address_string()} - {format % args}")
 
+    def send_json(self, obj, status=200):
+        body = json.dumps(obj, ensure_ascii=False).encode('utf-8')
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         """处理GET请求"""
         if self.path == '/status':
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-
-            status = {
+            self.send_json({
                 'status': 'online',
                 'timestamp': datetime.now().isoformat(),
                 'agent_id': OPENCLAW_AGENT_ID,
                 'voice_available': self.voice_manager.available
-            }
-            self.wfile.write(json.dumps(status, ensure_ascii=False).encode('utf-8'))
+            })
         else:
             self.send_error(404, "Not Found")
 
     def do_POST(self):
         """处理POST请求"""
-        content_length = int(self.headers['Content-Length'])
+        content_length = int(self.headers.get('Content-Length', 0))
+        if content_length > MAX_BODY_BYTES:
+            self.send_error(413, "Payload Too Large")
+            return
         post_data = self.rfile.read(content_length)
 
         try:
@@ -281,16 +308,13 @@ class ESP32RequestHandler(BaseHTTPRequestHandler):
                 response = {'success': False, 'error': f'未知操作: {action}'}
 
             # 发送响应
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps(response, ensure_ascii=False).encode('utf-8'))
+            self.send_json(response)
 
         except Exception as e:
             print(f"[HTTP] 处理请求异常: {e}")
             import traceback
             traceback.print_exc()
-            self.send_error(500, f"Internal Server Error: {str(e)}")
+            self.send_error(500, "Internal Server Error")
 
 def main():
     print("=" * 70)
@@ -302,16 +326,15 @@ def main():
     print("=" * 70)
 
     # 验证OpenClaw智能体
-    manager = OpenClawManager(OPENCLAW_AGENT_ID)
-    if manager.verify_agent():
+    if ESP32RequestHandler.openclaw_manager.verify_agent():
         print(f"[启动] ✓ OpenClaw智能体 '{OPENCLAW_AGENT_ID}' 已就绪")
     else:
         print(f"[启动] ✗ 警告: OpenClaw智能体 '{OPENCLAW_AGENT_ID}' 不存在")
         print(f"[启动] 请先创建智能体:")
         print(f"[启动]   openclaw agents add {OPENCLAW_AGENT_ID}")
 
-    # 创建HTTP服务器
-    server = HTTPServer((SERVER_HOST, SERVER_PORT), ESP32RequestHandler)
+    # 创建HTTP服务器（多线程，/status 不被慢的智能体调用阻塞；智能体调用本身由锁串行）
+    server = ThreadingHTTPServer((SERVER_HOST, SERVER_PORT), ESP32RequestHandler)
 
     print("[服务器] 启动成功，等待ESP32连接...")
     print("[服务器] 按Ctrl+C停止服务器")
