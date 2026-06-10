@@ -56,11 +56,16 @@ pip install faster-whisper edge-tts
 cp .env.example .env
 ```
 
+Die `.env`-Datei wird beim Start automatisch geladen (stdlib-Loader in `envcfg.py`, keine Zusatzabhängigkeit). Bereits gesetzte Umgebungsvariablen haben Vorrang.
+
 | Variable | Standard | Beschreibung |
 |----------|----------|--------------|
+| `SERVER_HOST` | `0.0.0.0` | Bind-Adresse (für LAN-only z. B. auf die LAN-IP einschränken) |
 | `SERVER_PORT` | `8080` | Server-Port |
-| `OPENCLAW_BIN` | `/usr/bin/openclaw` | Pfad zum KI-Agent-Binary |
+| `OPENCLAW_BIN` | `/home/ubuntu/.npm-global/bin/openclaw` | Pfad zum KI-Agent-Binary |
 | `OPENCLAW_AGENT_ID` | `esp32-voice` | Agent-ID für Sprachsitzungen |
+| `OPENCLAW_PATH_ENV` | *(geerbt)* | Überschreibt `PATH` im Subprozess; restliche Umgebung (`HOME` usw.) bleibt erhalten |
+| `OPENCLAW_TIMEOUT` | `60` | Timeout (Sekunden) pro Agent-Aufruf |
 
 ---
 
@@ -98,10 +103,24 @@ HTTP POST an `http://<server-ip>:8080/`:
 
 ## Technische Details
 
-- **Nebenläufigkeit:** Threading-Lock serialisiert KI-Aufrufe, verhindert Race Conditions
-- **Sitzungs-IDs:** Abgeleitet aus `device_id`, persistente Gesprächshistorie pro Gerät
+- **Nebenläufigkeit:** `ThreadingHTTPServer` — `/status` und weitere Geräte blockieren nicht hinter einem laufenden KI-Aufruf; die KI-Aufrufe selbst werden per Lock serialisiert
+- **Sitzungs-IDs:** Abgeleitet aus `device_id` **und** Ziel-Agent — `@ki`-Nachrichten an den Hauptagenten teilen sich keine Sitzung mit dem Sub-Agenten
 - **Dual-Routing:** Präfix `@ki` leitet Nachrichten an primären Agenten statt Sub-Agenten
+- **System-Prompt:** wird pro Sitzung nur mit der ersten Nachricht injiziert, nicht bei jedem Turn (Subagent-Server)
+- **Eingabegrenzen:** 1 MB für JSON-Anfragen, 20 MB für PCM-Audio (`413` bei Überschreitung)
+- **Fehlerausgaben:** stderr des Agenten bleibt im Server-Log und wird nie an das Gerät zurückgegeben (würde sonst per TTS vorgelesen)
 - **TTS-Optionen:** pyttsx3 (lokal, offline) oder Edge TTS (Microsoft Azure, höhere Qualität)
+
+---
+
+## Tests
+
+Die Testsuite ersetzt das `openclaw`-Binary durch einen Stub und prüft Routing, Sitzungstrennung, Prompt-Injektion und Anfragegrenzen — ohne echte Agenten oder Audio-Abhängigkeiten:
+
+```bash
+python3 -m venv .venv && ./.venv/bin/pip install pytest
+./.venv/bin/python -m pytest tests/ -v
+```
 
 ---
 
