@@ -1,0 +1,15 @@
+# =========================================================
+# OpenClaw 语音陪伴设备 — sdkconfig 默认值
+# 仅锁定目标与几个关键开关，其余交给 ESP-IDF 默认 + menuconfig
+# =========================================================
+
+# 目标芯片锁 ESP32-S3
+CONFIG_IDF_TARGET="esp32s3"
+
+# mbedTLS 证书包：打开后，menuconfig 里把 CC_TLS_SKIP_VERIFY 关掉即可用
+# 系统根证书校验证书（公共 CA 签发的服务器证书）。自签/私有 CA 不适用，
+# 需自行把 CA 换进固件（见 firmware/README.md）。
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+
+# 主任务栈加大：录音/HTTP/播放都在 app_main 任务里跑
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192

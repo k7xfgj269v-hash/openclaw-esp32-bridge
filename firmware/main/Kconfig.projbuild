@@ -1,0 +1,134 @@
+menu "OpenClaw 语音陪伴设备"
+
+    config CC_WIFI_SSID
+        string "WiFi SSID"
+        default "myssid"
+        help
+            必填：STA 模式要连接的路由器 SSID。
+            占位默认 myssid，烧录前请在 menuconfig 改成自己的。
+
+    config CC_WIFI_PASSWORD
+        string "WiFi 密码"
+        default "mypassword"
+        help
+            对应 SSID 的密码。WPA/WPA2/WPA3-PSK 均按 WPA2 阈值连接；
+            纯开放网络请把阈值相关代码自行调整（见 wifi_mgr.c 注释）。
+
+    config CC_SERVER_SCHEME
+        string "服务器协议 (http/https)"
+        default "https"
+        help
+            语音服务端协议。仓库自带的 openclaw_subagent_server.py 是纯 HTTP
+            （默认 8080 端口，无 TLS）；若你前面挂了 nginx/caddy 的 HTTPS 反代
+            或服务端本身带 TLS，就填 https。
+
+    config CC_SERVER_HOST
+        string "服务器主机 / IP"
+        default "<DE_IP>"
+        help
+            占位默认 <DE_IP>，不含协议与端口。烧录前必须改成真实地址。
+            例如 10.0.0.3 或 voice.example.com。
+
+    config CC_SERVER_PORT
+        int "服务器端口"
+        default 8443
+        range 1 65535
+        help
+            语音接口端口。直连 Python 服务(无 TLS)用 8080；HTTPS 反代按实际填。
+
+    config CC_SERVER_PATH
+        string "语音接口路径"
+        default "/voice"
+        help
+            上传接口路径，默认 /voice，与仓库 voice_server 系列一致。
+
+    config CC_AUTH_TOKEN
+        string "访问令牌 (Authorization: Bearer <token>)"
+        default ""
+        help
+            非空时每次请求带 Authorization: Bearer <token>。留空则不带鉴权头。
+
+    config CC_TLS_SKIP_VERIFY
+        bool "跳过 HTTPS 证书校验（自签证书调试用）"
+        default y
+        help
+            y：不校验服务器证书（适合 DE 那台自签 HTTPS，先跑通链路）。
+            n：校验证书。默认走系统根证书（需在 Component config -> mbedTLS
+                打开 Certificate bundle；sdkconfig.defaults 已打开）。
+                若服务器用的是私有 CA 签的证书，根证书校验会失败，
+                需要把该 CA 加进固件（改 voice_client.c 用 cert_pem）。
+
+    config CC_HTTP_TIMEOUT_MS
+        int "HTTP 请求超时(毫秒)"
+        default 120000
+        range 5000 600000
+        help
+            覆盖连接/读写的单次网络超时。服务端要等 AI 回复(最快几十秒)，
+            建议保持 120s 以上，否则等待期间可能被判定超时断开。
+
+    config CC_REC_MAX_SEC
+        int "最长录音时长(秒)"
+        default 10
+        range 1 30
+        help
+            按住 PTT 的上限。10s ≈ 320KB PCM(16k/16bit/单声道)。
+            无 PSRAM 的板子内存不够时会自动缩小缓冲（见 app_main.c），
+            最多能录实际分配到的时长；推荐加 PSRAM 的板子。
+
+    config CC_RESP_MAX_KB
+        int "服务端响应音频上限(KB)"
+        default 512
+        range 64 4096
+        help
+            服务器返回的 WAV 体积上限，超出直接报错。512KB≈16s 16k 单声道。
+
+    config CC_PTT_GPIO
+        int "PTT 录音按键 GPIO"
+        default 0
+        range 0 48
+        help
+            按住录音、松开停止。默认 GPIO0（开发板 BOOT 键，按下为低电平，
+            已启用内部上拉）。注意：复位瞬间按住会进下载模式，运行时无碍。
+
+    config CC_MIC_BCLK
+        int "麦克风 INMP441 BCLK(SCK) GPIO"
+        default 4
+        range 0 48
+    config CC_MIC_WS
+        int "麦克风 INMP441 WS(LRCK) GPIO"
+        default 5
+        range 0 48
+    config CC_MIC_DIN
+        int "麦克风 INMP441 SD(数据出) GPIO"
+        default 6
+        range 0 48
+        help
+            INMP441 的 SD 是数据输出，接到 ESP32 的 I2S RX DIN。
+
+    config CC_SPK_BCLK
+        int "功放 MAX98357A BCLK GPIO"
+        default 15
+        range 0 48
+    config CC_SPK_WS
+        int "功放 MAX98357A LRC(WS) GPIO"
+        default 16
+        range 0 48
+    config CC_SPK_DIN
+        int "功放 MAX98357A DIN(数据入) GPIO"
+        default 17
+        range 0 48
+
+    choice CC_MIC_LR
+        prompt "INMP441 数据所在声道"
+        default CC_MIC_LR_LEFT
+        help
+            取决于 INMP441 L/R 脚的接法。取错声道会录到静音或噪声，
+            此时切到另一项即可，无需改线。
+
+        config CC_MIC_LR_LEFT
+            bool "左声道（L/R 接 GND，WS 低电平期间输出）"
+        config CC_MIC_LR_RIGHT
+            bool "右声道（L/R 接 VDD，WS 高电平期间输出）"
+    endchoice
+
+endmenu
