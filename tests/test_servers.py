@@ -2,6 +2,7 @@ import http.client
 import json
 import os
 import threading
+import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 
@@ -18,14 +19,38 @@ def start_server(handler_cls):
     return server, server.server_address[1]
 
 
-def post_json(port, payload, path='/'):
+def request(port, path='/', payload=None, method='POST', token=None):
+    """带可选 Bearer token 的 HTTP 请求，返回 (status, body_bytes)；4xx/5xx 不抛异常"""
+    headers = {}
+    data = None
+    if payload is not None:
+        data = json.dumps(payload).encode('utf-8')
+        headers['Content-Type'] = 'application/json'
+    if token is not None:
+        headers['Authorization'] = 'Bearer ' + token
     req = urllib.request.Request(
-        f'http://127.0.0.1:{port}{path}',
-        data=json.dumps(payload).encode('utf-8'),
-        headers={'Content-Type': 'application/json'},
-    )
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        return json.loads(resp.read().decode('utf-8'))
+        f'http://127.0.0.1:{port}{path}', data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+
+
+def _token():
+    return os.environ['SERVER_TOKEN']
+
+
+def post_json(port, payload, path='/'):
+    status, body = request(port, path, payload, token=_token())
+    assert status == 200, f'expected 200, got {status}: {body[:200]!r}'
+    return json.loads(body.decode('utf-8'))
+
+
+def get_status(port):
+    status, body = request(port, '/status', method='GET', token=_token())
+    assert status == 200, f'expected 200, got {status}: {body[:200]!r}'
+    return json.loads(body.decode('utf-8'))
 
 
 # ---------- envcfg ----------
@@ -81,8 +106,7 @@ def test_enhanced_http_roundtrip():
         data = post_json(port, {'device_id': 'hdev', 'message': 'ping'})
         assert data['success'] and data['agent'] == 'esp32-voice'
         assert 'msg=ping' in data['reply']
-        with urllib.request.urlopen(f'http://127.0.0.1:{port}/status', timeout=15) as r:
-            status = json.loads(r.read().decode('utf-8'))
+        status = get_status(port)
         assert status['status'] == 'online'
     finally:
         server.shutdown()
@@ -123,6 +147,7 @@ def test_agent_server_rejects_oversized_body():
     try:
         conn = http.client.HTTPConnection('127.0.0.1', port, timeout=15)
         conn.putrequest('POST', '/')
+        conn.putheader('Authorization', 'Bearer ' + _token())
         conn.putheader('Content-Length', str(100 * 1024 * 1024))
         conn.endheaders()
         resp = conn.getresponse()
@@ -149,3 +174,24 @@ def test_subagent_prompt_primed_once():
         assert '严格遵守' in d3['reply']  # 新会话重新注入
     finally:
         server.shutdown()
+
+
+# ---------- 鉴权：无 token / 错 token 一律 401（fail-closed） ----------
+
+def test_all_servers_reject_missing_and_wrong_token():
+    handlers = [
+        (vs.ESP32RequestHandler, 'voice_server'),
+        (vse.ESP32RequestHandler, 'voice_server_enhanced'),
+        (oas.OpenClawHandler, 'openclaw_agent_server'),
+        (oss.OpenClawSubagentHandler, 'openclaw_subagent_server'),
+    ]
+    for handler_cls, name in handlers:
+        server, port = start_server(handler_cls)
+        try:
+            payload = {'device_id': 'x', 'message': 'hi'}
+            status, _ = request(port, '/', payload=payload, token=None)
+            assert status == 401, f'{name}: no token -> {status}'
+            status, _ = request(port, '/', payload=payload, token='wrong-token')
+            assert status == 401, f'{name}: wrong token -> {status}'
+        finally:
+            server.shutdown()

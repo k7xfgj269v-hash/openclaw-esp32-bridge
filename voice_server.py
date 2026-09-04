@@ -32,6 +32,7 @@ OPENCLAW_PATH = os.environ.get('OPENCLAW_BIN', '/home/ubuntu/.npm-global/bin/ope
 OPENCLAW_AGENT_ID = os.environ.get('OPENCLAW_AGENT_ID', 'esp32-voice')  # 永久智能体ID
 OPENCLAW_TIMEOUT = int(os.environ.get('OPENCLAW_TIMEOUT', '60'))
 MAX_BODY_BYTES = 1024 * 1024  # 文本请求体上限
+SERVER_TOKEN = os.environ.get('SERVER_TOKEN', '')  # 请求头 Authorization: Bearer <token>；空即拒绝所有请求
 
 
 def openclaw_env():
@@ -201,6 +202,19 @@ class ESP32RequestHandler(BaseHTTPRequestHandler):
         """自定义日志格式"""
         print(f"[HTTP] {self.address_string()} - {format % args}")
 
+    def _auth_ok(self):
+        """校验请求头 Authorization: Bearer <token>；未配置或不匹配一律 401"""
+        expected = 'Bearer ' + SERVER_TOKEN
+        if not SERVER_TOKEN or self.headers.get('Authorization') != expected:
+            body = json.dumps({'error': 'unauthorized'}).encode('utf-8')
+            self.send_response(401)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return False
+        return True
+
     def send_json(self, obj, status=200):
         body = json.dumps(obj, ensure_ascii=False).encode('utf-8')
         self.send_response(status)
@@ -211,6 +225,8 @@ class ESP32RequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         """处理GET请求"""
+        if not self._auth_ok():
+            return
         if self.path == '/status':
             self.send_json({
                 'status': 'online',
@@ -223,6 +239,8 @@ class ESP32RequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         """处理POST请求"""
+        if not self._auth_ok():
+            return
         content_length = int(self.headers.get('Content-Length', 0))
         if content_length > MAX_BODY_BYTES:
             self.send_error(413, "Payload Too Large")

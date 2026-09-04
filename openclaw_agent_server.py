@@ -15,6 +15,7 @@ load_dotenv()
 
 SERVER_HOST = os.environ.get('SERVER_HOST', '0.0.0.0')
 SERVER_PORT = int(os.environ.get('SERVER_PORT', '8080'))
+SERVER_TOKEN = os.environ.get('SERVER_TOKEN', '')  # 请求头 Authorization: Bearer <token>；空即拒绝所有请求
 
 # OpenClaw 配置
 OPENCLAW_SESSION_PREFIX = 'esp32_voice_'
@@ -38,7 +39,22 @@ class OpenClawHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {format % args}")
 
+    def _auth_ok(self):
+        """校验请求头 Authorization: Bearer <token>；未配置或不匹配一律 401"""
+        expected = 'Bearer ' + SERVER_TOKEN
+        if not SERVER_TOKEN or self.headers.get('Authorization') != expected:
+            body = json.dumps({'error': 'unauthorized'}).encode('utf-8')
+            self.send_response(401)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return False
+        return True
+
     def do_GET(self):
+        if not self._auth_ok():
+            return
         response = json.dumps({'status': 'ok', 'service': 'OpenClaw Agent Server'})
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
@@ -47,6 +63,8 @@ class OpenClawHandler(BaseHTTPRequestHandler):
         self.wfile.write(response.encode())
 
     def do_POST(self):
+        if not self._auth_ok():
+            return
         try:
             length = int(self.headers.get('Content-Length', 0))
             if length > MAX_BODY_BYTES:

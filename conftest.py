@@ -43,3 +43,4 @@ os.environ['OPENCLAW_BIN'] = _make_stub()
 os.environ['OPENCLAW_AGENT_ID'] = 'esp32-voice'
 os.environ['OPENCLAW_TIMEOUT'] = '10'
 os.environ.pop('OPENCLAW_PATH_ENV', None)
+os.environ['SERVER_TOKEN'] = 'test-server-token'

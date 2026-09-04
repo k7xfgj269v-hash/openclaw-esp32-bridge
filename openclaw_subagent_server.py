@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""ESP32 语音助手服务器 - 使用 OpenClaw esp32-voice 子智能体"""
+"""ESP32 语音助手服务器 - OpenClaw 子智能体；/voice 使用阿里云百炼 cosyvoice 合成 16kHz WAV"""
 
 import os
 import json
@@ -8,8 +8,7 @@ import struct
 import subprocess
 import threading
 import tempfile
-import shutil
-import asyncio
+import urllib.request
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 
@@ -26,10 +25,14 @@ SESSION_PREFIX = 'esp32_'
 OPENCLAW_TIMEOUT = int(os.environ.get('OPENCLAW_TIMEOUT', '60'))
 MAX_TEXT_BYTES = 1024 * 1024        # 文本请求体上限
 MAX_AUDIO_BYTES = 20 * 1024 * 1024  # PCM 音频上限（16kHz 16bit 单声道约 10 分钟）
+SERVER_TOKEN = os.environ.get('SERVER_TOKEN', '')  # 请求头 Authorization: Bearer <token>；空即拒绝所有请求
 
-SYSTEM_PROMPT = """你是ESP32语音助手。用户通过语音交互，你的回复会被语音播报。
+# 阿里云百炼 cosyvoice 非实时 TTS（/voice 输出 16kHz 单声道 WAV，无需 ffmpeg）
+DASHSCOPE_API_KEY = os.environ.get('DASHSCOPE_API_KEY', '')
+DASHSCOPE_TTS_MODEL = os.environ.get('DASHSCOPE_TTS_MODEL', 'cosyvoice-v3-flash')
+DASHSCOPE_TTS_VOICE = os.environ.get('DASHSCOPE_TTS_VOICE', 'longxiaochun_v3')
 
-严格遵守以下规则：
+SYSTEM_PROMPT = """你的回复会被语音合成播报，请严格遵守以下规则：
 1. 回复必须是纯文本，不使用任何Markdown格式
 2. 不使用表情符号
 3. 使用口语化、自然的表达
@@ -72,10 +75,33 @@ def build_wav_header(pcm_data, sample_rate=16000, channels=1, bits=16):
     return header + pcm_data
 
 
-async def _tts_async(text, output_file):
-    import edge_tts
-    communicate = edge_tts.Communicate(text, voice="zh-CN-XiaoxiaoNeural")
-    await communicate.save(output_file)
+def _ali_tts_bytes(text):
+    """阿里云百炼 cosyvoice 非实时合成，返回 16kHz 单声道 WAV 字节（stdlib urllib）"""
+    if not DASHSCOPE_API_KEY:
+        raise RuntimeError("未配置 DASHSCOPE_API_KEY，无法调用阿里云 TTS")
+    payload = json.dumps({
+        'model': DASHSCOPE_TTS_MODEL,
+        'input': {
+            'text': text,
+            'voice': DASHSCOPE_TTS_VOICE,
+            'format': 'wav',
+            'sample_rate': 16000,
+        },
+    }).encode('utf-8')
+    req = urllib.request.Request(
+        'https://dashscope.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer',
+        data=payload,
+        headers={
+            'Authorization': 'Bearer ' + DASHSCOPE_API_KEY,
+            'Content-Type': 'application/json',
+        },
+        method='POST',
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        result = json.loads(resp.read().decode('utf-8'))
+    audio_url = result['output']['audio']['url']  # OSS 临时地址，24h 内有效
+    with urllib.request.urlopen(audio_url, timeout=120) as audio_resp:
+        return audio_resp.read()
 
 
 class OpenClawSubagentHandler(BaseHTTPRequestHandler):
@@ -86,7 +112,22 @@ class OpenClawSubagentHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {format % args}")
 
+    def _auth_ok(self):
+        """校验请求头 Authorization: Bearer <token>；未配置或不匹配一律 401"""
+        expected = 'Bearer ' + SERVER_TOKEN
+        if not SERVER_TOKEN or self.headers.get('Authorization') != expected:
+            body = json.dumps({'error': 'unauthorized'}).encode('utf-8')
+            self.send_response(401)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return False
+        return True
+
     def do_GET(self):
+        if not self._auth_ok():
+            return
         response = json.dumps({'status': 'ok', 'service': 'OpenClaw ESP32-Voice Agent Server'})
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
@@ -95,6 +136,8 @@ class OpenClawSubagentHandler(BaseHTTPRequestHandler):
         self.wfile.write(response.encode())
 
     def do_POST(self):
+        if not self._auth_ok():
+            return
         if self.path == '/voice':
             self.handle_voice_request()
         else:
@@ -132,28 +175,10 @@ class OpenClawSubagentHandler(BaseHTTPRequestHandler):
             reply_text = self.call_openclaw_agent(session_id, recognized_text)
             print(f"[AI回复] {reply_text[:100]}")
 
-            # 4. edge-tts 转语音
-            fd, mp3_output = tempfile.mkstemp(prefix='esp32_out_', suffix='.mp3', dir='/tmp')
-            os.close(fd)
-            tmp_files.append(mp3_output)
-            asyncio.run(_tts_async(reply_text, mp3_output))
+            # 4. 阿里云百炼 cosyvoice 非实时合成，直接返回 16kHz 单声道 WAV
+            wav_bytes = _ali_tts_bytes(reply_text)
 
-            # 5. ffmpeg 转为 16kHz 16bit 单声道 WAV
-            fd, wav_output = tempfile.mkstemp(prefix='esp32_out_', suffix='.wav', dir='/tmp')
-            os.close(fd)
-            tmp_files.append(wav_output)
-            result = subprocess.run(
-                ["ffmpeg", "-y", "-i", mp3_output,
-                 "-ar", "16000", "-ac", "1", "-sample_fmt", "s16", wav_output],
-                capture_output=True, timeout=30
-            )
-            if result.returncode != 0:
-                raise RuntimeError(f"ffmpeg失败: {result.stderr.decode()}")
-
-            # 6. 返回 WAV 音频
-            with open(wav_output, 'rb') as f:
-                wav_bytes = f.read()
-
+            # 5. 返回 WAV 音频
             print(f"[语音响应] WAV 大小: {len(wav_bytes)} 字节")
             self.send_response(200)
             # 先按字符截断再编码，避免把 UTF-8 多字节字符切断
@@ -253,8 +278,6 @@ class OpenClawSubagentHandler(BaseHTTPRequestHandler):
 
 
 if __name__ == '__main__':
-    if shutil.which('ffmpeg') is None:
-        print("[警告] 未找到 ffmpeg，/voice 接口将不可用（brew/apt install ffmpeg）")
     get_whisper()
     print(f"服务器启动: {SERVER_HOST}:{SERVER_PORT}")
     print(f"接口: POST / (JSON文本)  POST /voice (PCM音频)")

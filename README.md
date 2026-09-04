@@ -6,6 +6,10 @@ HTTP bridge between ESP32-S3 hardware and OpenClaw AI agents — supports TTS, S
 
 `OpenClaw ESP32 Bridge` is a Python HTTP server that lets an ESP32-S3 microcontroller talk to [OpenClaw](https://github.com/openclaw) AI agents over plain JSON. It ships several runnable server variants — from a minimal text-only wrapper up to a full voice pipeline (local Whisper speech-to-text + Edge TTS text-to-speech) — with per-device conversation sessions and dual-agent routing via the `@ki` prefix.
 
+> **Auth (all variants):** the bridge binds `0.0.0.0`, so every request (including `GET /status`) must carry `Authorization: Bearer <token>`, with the token read from the `SERVER_TOKEN` env var. Requests without a matching token are rejected with `401` (fail-closed — also when `SERVER_TOKEN` is unset).
+>
+> **Voice TTS:** the full voice pipeline (`openclaw_subagent_server.py`, `POST /voice`) synthesizes speech with Aliyun DashScope CosyVoice (non-streaming) and returns a 16 kHz mono WAV directly to the ESP32 — no local `edge-tts`/`ffmpeg` needed. Configure `DASHSCOPE_API_KEY`, and optionally `DASHSCOPE_TTS_MODEL` / `DASHSCOPE_TTS_VOICE`.
+
 ```text
 ESP32-S3 device
       |  HTTP POST (JSON / PCM audio)
